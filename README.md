@@ -1,4 +1,4 @@
-# yt-dlp GUI v3.0
+# yt-dlp GUI v3.2
 
 **キラキラキソフト / KiraKiraKi Soft**
 
