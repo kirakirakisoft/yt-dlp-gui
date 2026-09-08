@@ -49,9 +49,10 @@ import json
 import os
 import re
 import sys
+import time
 
 APP_NAME    = "yt-dlp GUI"
-APP_VERSION = "v3.4.0"
+APP_VERSION = "v3.4.1"
 BRAND       = "キラキラキソフト"
 
 # ── カラー定義 ──────────────────────────────
@@ -106,6 +107,14 @@ RANGE_TIP = (
     "「12:00-27:00」(分:秒)や「720-1620」(秒)でも入力できます。\n"
     "終了に inf と書くと動画の最後までになります。\n"
     "空行と、行頭が「#」の行は読み飛ばします。\n"
+    "\n"
+    "行のうしろに「# 名前」と書くと、その名前で保存されます。\n"
+    "    *00:12:00-00:27:00  # 神プレイ    →  神プレイ.mp4\n"
+    "    *01:03:10-01:05:00  # 挨拶        →  挨拶.mp4\n"
+    "名前を書かない行は「配信タイトル [00-12-00-00-27-00].mp4」に\n"
+    "なります。同じ名前が2つあるときは後のほうに -2 が付きます。\n"
+    "※ リスト(プレイリスト)取得のときは名前を付けません。\n"
+    "\n"
     "※ 区間切り出しには ffmpeg 7.1 系が必要です(8.1 系は無反応になります)。")
 
 
@@ -189,6 +198,21 @@ def safe_filename(name, limit=80):
     if name.upper().split(".")[0] in _FN_RESERVED:
         name = "_" + name
     return name
+
+
+def sec_to_hms(sec):
+    """秒を「00:09:55」の形にする(進捗表示用)。"""
+    s = int(sec)
+    return f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}"
+
+
+def fmt_left(sec):
+    """残り時間を「約4分」「約40秒」の形にする。細かい数字は要らない。"""
+    if sec < 60:
+        return f"約{max(int(sec), 5) // 5 * 5}秒"
+    if sec < 3600:
+        return f"約{int(sec / 60) + 1}分"
+    return f"約{sec / 3600:.1f}時間"
 
 
 def sec_to_tag(sec):
@@ -778,7 +802,7 @@ class App(tk.Tk):
         やり直しが必要だったため、複数行の欄にした。
         """
         frame = tk.Frame(parent, bg=BG)
-        tk.Label(frame, text="時間範囲 (1行に1つ / 例 *00:12:00-00:27:00)",
+        tk.Label(frame, text="時間範囲 (1行に1つ / 例 *00:12:00-00:27:00  # 神プレイ)",
                  bg=BG, fg=FG3, font=("Yu Gothic UI", 8)).pack(anchor="w")
         ef = tk.Frame(frame, bg=BG2, highlightbackground=BORDER,
                       highlightthickness=1)
@@ -791,6 +815,13 @@ class App(tk.Tk):
         t.bind("<FocusIn>",  lambda ev: ef.config(highlightbackground=GREEN))
         t.bind("<FocusOut>", lambda ev: ef.config(highlightbackground=BORDER))
         self._add_context_menu(t, with_clear=True)
+        # 名前を付けられることは、欄を見ただけでは分からない。
+        # ツールチップは (?) に気づいた人しか読まないので、欄の下に出す。
+        tk.Label(frame,
+                 text="うしろに「# 名前」を書くと、その名前で保存されます"
+                      "(例: 神プレイ.mp4)。書かなければ時刻が入った名前になります",
+                 bg=BG, fg=FG3, font=("Yu Gothic UI", 8),
+                 justify="left").pack(anchor="w", pady=(3, 0))
         frame._entry = t
         self.range_text = t
         return frame
@@ -1193,12 +1224,34 @@ class App(tk.Tk):
     )
 
     def _capture_out_path(self, line):
-        """yt-dlp のログ行から保存先ファイルパスを拾って記憶する。"""
+        """yt-dlp のログ行から保存先ファイルパスを拾って記憶する。
+
+        あわせて、今どの区間を処理しているのかもここで拾う。保存先の名前に
+        区間が入っているので、進捗の分母(区間の長さ)がこれで分かる。
+        """
         for pat in self._OUT_PATTERNS:
             m = pat.match(line)
             if m:
-                self._out_files.append(m.group(1).strip())
+                path = m.group(1).strip()
+                self._out_files.append(path)
+                self._note_section(path)
                 return
+
+    def _note_section(self, path):
+        """保存先の名前から区間の長さを読み取る(進捗の分母にする)。"""
+        m = self._SEC_IN_NAME.search(os.path.basename(path))
+        if not m:
+            return
+        h1, m1, s1, h2, m2, s2 = (int(x) for x in m.groups())
+        start, end = h1 * 3600 + m1 * 60 + s1, h2 * 3600 + m2 * 60 + s2
+        if end <= start:
+            # 24時間を跨いだ区間。名前だけでは長さを出せないので諦める
+            return
+        if (start, end) == self._cur_sec:
+            return          # 同じ区間の2本目(映像と音声)。測り直さない
+        self._cur_sec = (start, end)
+        self._cur_sec_dur = end - start
+        self._cur_sec_t0 = None   # 次の進捗行で測り始める
 
     def _verify_output(self):
         """落ちてきたファイルの解像度・コーデックを ffprobe で確認してログ表示。
@@ -1315,14 +1368,37 @@ class App(tk.Tk):
     # ffmpeg の進捗行(frame= 123 fps= 45 ... time=00:01:23.45 ...)
     _FFMPEG_PROGRESS = re.compile(r'^(frame|size)=')
     _FFMPEG_TIME     = re.compile(r'time=(\d{2}:\d{2}:\d{2})')
+    # 出力ファイル名に入れている区間「 [00-12-00-00-27-00]」
+    _SEC_IN_NAME = re.compile(
+        r' \[(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})-(\d{2})\]')
 
     def _handle_line(self, line):
         """yt-dlp / ffmpeg の出力1行を振り分ける(ワーカースレッドから呼ばれる)。"""
         # ffmpeg の進捗はログに流すと大量になるので、ステータス表示だけ更新する
         if self._FFMPEG_PROGRESS.match(line):
             m = self._FFMPEG_TIME.search(line)
-            pos = m.group(1) if m else "処理中"
-            self.after(0, self._set_status, f"切り出し中... {pos}", PINK)
+            if not m:
+                self.after(0, self._set_status, "切り出し中... 処理中", PINK)
+                return
+            pos = m.group(1)
+            # 区間の長さが分かるときは、割合と残り時間まで出す。
+            # 「00:05:22」だけだと、あと何分なのかが分からず
+            # 止まっているようにしか見えない(実際そう言われた)。
+            dur = self._cur_sec_dur
+            if not dur:
+                self.after(0, self._set_status, f"切り出し中... {pos}", PINK)
+                return
+            done = hms_to_sec(pos) or 0
+            p = min(done / dur, 1.0)
+            text = f"切り出し中... {pos} / {sec_to_hms(dur)} ({p * 100:.0f}%)"
+            if self._cur_sec_t0 is None:
+                self._cur_sec_t0 = time.monotonic()
+            # 序盤は見積もりが大きく振れるので1割進むまで出さない。
+            # 終わりかけで「残り約5秒」と出すのも意味が無いので出さない。
+            elif 0.1 <= p < 0.99:
+                left = (time.monotonic() - self._cur_sec_t0) * (1 - p) / p
+                text += f"  残り{fmt_left(left)}"
+            self.after(0, self._set_status, text, PINK)
             return
 
         tag = "info"
@@ -1338,6 +1414,10 @@ class App(tk.Tk):
         """cmd を別スレッドで実行し、終了時に _on_done を呼ぶ。"""
         self._err_lines = []  # エラー診断用にERROR/WARNING行を収集
         self._out_files = []  # 保存されたファイルのパス(完了後の画質確認用)
+        # 進捗表示用。今どの区間を、どれだけの長さで処理しているか
+        self._cur_sec = None
+        self._cur_sec_dur = None
+        self._cur_sec_t0 = None
         if not hasattr(self, "_rename_plan"):
             self._rename_plan = []
         def task():

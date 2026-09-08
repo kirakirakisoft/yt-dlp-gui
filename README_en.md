@@ -1,4 +1,4 @@
-# yt-dlp GUI v3.4.0
+# yt-dlp GUI v3.4.1
 
 **KiraKiraKi Soft**
 
@@ -253,6 +253,7 @@ Please note:
 
 ## Changelog
 
+- **v3.4.1** — **Section extraction now shows how much is left.** It used to display only `切り出し中... 00:05:22`, which gave no sense of progress and looked stuck; it now reads `00:05:22 / 00:09:55 (54%) 残り約4分`. The **`# name` feature is also explained in the time-range area itself** (a hint line under the box and in the `(?)` tooltip) — it was not visible anywhere in the UI before
 - **v3.4.0** — **Sections can now be named.** Write `# best play` at the end of a range line and the extracted file is named after it (`best play.mp4`). Duplicate names get `-2` / `-3`, and characters that cannot be used in a file name are replaced with their full-width forms. Lines without a name keep the usual `[start-end]` name. This release also **fixes identical sections written in different notations (`00:12:00-00:27:00` and `720-1620`) being treated as different ranges** — they produced the same file name, so the second one was silently lost
 - **v3.3.0** — **Multiple time ranges can now be given at once.** The time range input changed from separate start/end fields to a multi-line box, and `*00:12:00-00:27:00` can be pasted straight in (without the `*`, as mm:ss, as seconds, or with `inf` too). Every range written is extracted in a single download. Output file names now carry the section start/end, which also fixes multiple sections overwriting each other. This release also **fixes time-range downloads always dropping to 360p** (older versions only considered pre-muxed mp4, which on YouTube is fixed at 640x360), fixes the log appearing frozen during section extraction, and adds a post-download resolution/codec check. **Added a field to choose which ffmpeg folder to use** (**ffmpeg 8.1.x breaks time-range downloads**, so point it at a 7.1 build; a warning is now shown before starting if ffmpeg is 8.x). The startup log shows the ffmpeg path and version in use
 - **v3.2.1** — Added a chat-only mode (saves the stream chat as `live_chat.json`). Switched the UI fonts to Japanese-friendly ones (Yu Gothic UI / BIZ UDGothic)
