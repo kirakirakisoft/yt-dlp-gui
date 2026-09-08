@@ -51,7 +51,7 @@ import re
 import sys
 
 APP_NAME    = "yt-dlp GUI"
-APP_VERSION = "v3.3.0"
+APP_VERSION = "v3.4.0"
 BRAND       = "キラキラキソフト"
 
 # ── カラー定義 ──────────────────────────────
@@ -88,8 +88,14 @@ FORCE_KEYFRAMES_AT_CUTS = False
 # そのまま貼り付けられるようにするため、以下をすべて受け付ける。
 #   *00:12:00-00:27:00 / 00:12:00-00:27:00 / 12:00-27:00 / 720-1620
 # 終了に inf と書くと動画の最後まで。
+#
+# 行末に「# メモ」を書くと、それが切り出したファイルの名前になる。
+#   *00:12:00-00:27:00  # 神プレイ   → 「神プレイ.mp4」
+# 行頭の「#」はコメント(下の parse_ranges で読み飛ばす)なので、
+# 「#」はどちらの位置でも「ここから先は時間ではない」を意味する。
 _T = r"\d{1,6}(?::\d{1,2}){0,2}(?:\.\d+)?"
-RANGE_RE = re.compile(rf"^\*?\s*(?P<s>{_T})\s*-\s*(?P<e>inf|{_T})\s*$", re.I)
+RANGE_RE = re.compile(
+    rf"^\*?\s*(?P<s>{_T})\s*-\s*(?P<e>inf|{_T})\s*(?:#\s*(?P<memo>.*?)\s*)?$", re.I)
 
 RANGE_TIP = (
     "切り出したい範囲を1行に1つ書きます。複数書けば、1回のダウンロードで\n"
@@ -120,13 +126,14 @@ def hms_to_sec(text):
 def parse_ranges(text):
     """複数行のテキストを範囲の一覧にする。
 
-    戻り値は (ranges, errors)。
-      ranges = [(開始文字列, 終了文字列, 開始秒, 終了秒 or None), ...]
+    戻り値は (ranges, errors, dupes)。
+      ranges = [(開始文字列, 終了文字列, 開始秒, 終了秒 or None, メモ), ...]
       errors = [(行番号, 行の内容), ...]
+      dupes  = [(行番号, 開始文字列, 終了文字列, メモ), ...]  まとめた重複行
     どの行がおかしいのか分からないと直しようがないので、
     エラーは「まとめて1件」ではなく行番号付きで全部返す。
     """
-    ranges, errors, seen = [], [], set()
+    ranges, errors, dupes, seen = [], [], [], set()
     for lineno, raw in enumerate(text.splitlines(), 1):
         line = raw.strip()
         if not line or line.startswith("#"):
@@ -136,19 +143,62 @@ def parse_ranges(text):
             errors.append((lineno, line))
             continue
         s_str, e_str = m.group("s"), m.group("e")
+        memo = (m.group("memo") or "").strip()
         is_inf = e_str.lower() == "inf"
         s_sec = hms_to_sec(s_str)
         e_sec = None if is_inf else hms_to_sec(e_str)
         if s_sec is None or (not is_inf and e_sec is None):
             errors.append((lineno, line))
             continue
-        # 全く同じ範囲が2行あると、出力名も同じになって2本目が
+        # 同じ範囲が2行あると、出力名も同じになって2本目が
         # 「has already been downloaded」で保存されない。1つにまとめる。
-        if (s_str, e_str) in seen:
+        # メモだけが違う場合も、yt-dlp から見れば同じ区間なので
+        # 2本には分けられない。黙って消えると気づけないので呼び出し側に返す。
+        #
+        # 見比べるのは秒であって書き方ではない。「00:12:00-00:27:00」と
+        # 「720-1620」は書き方が違うだけの同じ区間で、文字列で比べると
+        # 別物として通ってしまい、2本目が保存されないまま残る。
+        if (s_sec, e_sec) in seen:
+            dupes.append((lineno, s_str, e_str, memo))
             continue
-        seen.add((s_str, e_str))
-        ranges.append((s_str, e_str, s_sec, e_sec))
-    return ranges, errors
+        seen.add((s_sec, e_sec))
+        ranges.append((s_str, e_str, s_sec, e_sec, memo))
+    return ranges, errors, dupes
+
+
+# ── メモをファイル名にする ───────────────────
+# Windows のファイル名に使えない文字は全角に置き換える。消してしまうと
+# 「E:*」が「E」になるなど意味が変わるため、形の似た全角を当てる。
+_FN_TRANS = str.maketrans({
+    "\\": "￥", "/": "／", ":": "：", "*": "＊",
+    "?": "？", '"': "”", "<": "＜", ">": "＞", "|": "｜",
+})
+# デバイス名はファイル名にできない(CON.mp4 も不可)。
+_FN_RESERVED = {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} \
+    | {f"LPT{i}" for i in range(1, 10)}
+
+
+def safe_filename(name, limit=80):
+    """メモをファイル名として使える形にする。使えないときは空文字を返す。"""
+    name = "".join(ch for ch in name if ch >= " ")   # 制御文字を落とす
+    name = name.translate(_FN_TRANS)
+    name = re.sub(r"\s+", " ", name).strip()
+    name = name[:limit].strip()
+    # 末尾の「.」と空白は Windows が勝手に落とすので、こちらで削る
+    name = name.rstrip(" .")
+    if name.upper().split(".")[0] in _FN_RESERVED:
+        name = "_" + name
+    return name
+
+
+def sec_to_tag(sec):
+    """秒を出力ファイル名に入っている「00-12-00」の形にする。
+
+    yt-dlp の %(section_start>%H-%M-%S)s と同じ結果になる必要がある。
+    あちらは時刻として整形するので24時間で一周する。ここでも合わせる。
+    """
+    s = int(sec) % 86400
+    return f"{s // 3600:02d}-{s % 3600 // 60:02d}-{s % 60:02d}"
 
 
 
@@ -956,7 +1006,7 @@ class App(tk.Tk):
         ranges  = []
 
         if time_on:
-            ranges, errors = parse_ranges(self.range_text.get("1.0", "end"))
+            ranges, errors, dupes = parse_ranges(self.range_text.get("1.0", "end"))
             if errors:
                 for lineno, raw in errors:
                     self._log(f"[エラー] {lineno}行目「{raw}」は時間範囲として"
@@ -968,15 +1018,22 @@ class App(tk.Tk):
                           "「*00:12:00-00:27:00」の形で、1行に1つ"
                           "書いてください", "warn")
                 return
-            for s_str, e_str, s_sec, e_sec in ranges:
+            for s_str, e_str, s_sec, e_sec, _memo in ranges:
                 if e_sec is not None and e_sec <= s_sec:
                     self._log(f"[エラー]「{s_str}-{e_str}」は終了が開始より"
                               "前(または同じ)です", "warn")
                     return
+            # 同じ区間の行は1つにまとめている。メモが違っていても
+            # 分けられないので、どれを使ったのかを知らせる。
+            for lineno, s_str, e_str, memo in dupes:
+                self._log(f"[注意] {lineno}行目「{s_str}-{e_str}」は"
+                          "同じ範囲が既にあるためまとめました"
+                          + (f"(メモ「{memo}」は使われません)" if memo else ""),
+                          "warn")
             # 出力ファイル名は区間を HH-MM-SS で入れて区別している。
             # 24時間で一周するため、24時間以上離れた区間どうしは
             # 同名になりうる(2つ目以降が保存されない)。
-            if any(s >= 86400 for _, _, s, _ in ranges) and len(ranges) > 1:
+            if any(s >= 86400 for _, _, s, _, _ in ranges) and len(ranges) > 1:
                 self._log("[注意] 24時間を超える位置の範囲があります。"
                           "ファイル名の時刻表記は24時間で一周するため、"
                           "24時間ちょうど離れた範囲があると2つ目が"
@@ -1074,7 +1131,7 @@ class App(tk.Tk):
                 cmd += ["--write-subs", "--sub-langs", "live_chat"]
 
             if time_on:
-                for s_str, e_str, _s, _e in ranges:
+                for s_str, e_str, _s, _e, _memo in ranges:
                     cmd += ["--download-sections", f"*{s_str}-{e_str}"]
                 # 指定秒ちょうどで切る場合のみ。区間全体の再エンコードが
                 # 走るため非常に遅い。既定はOFF(ファイル冒頭の定数で切替)。
@@ -1089,6 +1146,15 @@ class App(tk.Tk):
         # 再試行(自動更新後)のためにコマンドを保持
         self._last_cmd = cmd
         self._retried = False
+        # 完了後にメモの名前へ変えるための控え(区間を渡さないときは空)。
+        #
+        # リスト(プレイリスト)のときは付けない。区間はリストの動画すべてに
+        # 同じものが適用されるので、同じメモの名前が動画の数だけできてしまい、
+        # どれがどの動画か分からなくなる。番号付きの名前のまま残すほうが良い。
+        self._rename_plan = ranges if sections_on and not self.playlist_on.get() else []
+        if sections_on and self.playlist_on.get() and any(r[4] for r in ranges):
+            self._log("[注意] リスト取得のときは、メモをファイル名にしません"
+                      "(動画ごとに同じ名前になってしまうため)", "warn")
 
         self.running = True
         self.cancelled = False
@@ -1110,8 +1176,9 @@ class App(tk.Tk):
                     else "切り口は最寄りのキーフレームに寄ります")
             tag = "warn" if FORCE_KEYFRAMES_AT_CUTS else "info"
             self._log(f"[区間] {len(ranges)}個の範囲を切り出します({note})", tag)
-            for n, (s_str, e_str, _s, _e) in enumerate(ranges, 1):
-                self._log(f"  {n}. {s_str} - {e_str}", "info")
+            for n, (s_str, e_str, _s, _e, memo) in enumerate(ranges, 1):
+                self._log(f"  {n}. {s_str} - {e_str}"
+                          + (f"  → 「{memo}」" if memo else ""), "info")
             # どの ffmpeg で切り出したかをログに残す(不具合の切り分け用)
             self._log(f"[ffmpeg] {self.ffmpeg_path}", "info")
 
@@ -1179,6 +1246,72 @@ class App(tk.Tk):
         else:
             self._log(msg, "ok")
 
+    def _rename_by_memo(self):
+        """メモ付きの区間で切り出したファイルを、そのメモの名前に変える。
+
+        yt-dlp は1回の実行で「区間ごとに別の名前」を付けられない。
+        区間の数だけ yt-dlp を起動し直せば付けられるが、区間ごとに
+        取得からやり直すことになるうえ、ffmpeg 7.1 が要る処理を
+        区間の数だけ通すことになるので、失敗する機会も待ち時間も増える。
+        そこで「1回で全部落として、あとから名前を変える」形にしている。
+
+        どのファイルがどの区間かは、出力名の形をこちらで組み立てて
+        いる(「タイトル [00-12-00-00-27-00].mp4」)ので時刻から確定できる。
+        yt-dlp のログを読む必要はない。
+        """
+        plan = [r for r in self._rename_plan if r[4]]
+        if not plan:
+            return
+        try:
+            names = os.listdir(self.download_dir)
+        except OSError:
+            return
+
+        for s_str, e_str, s_sec, e_sec, memo in plan:
+            stem = safe_filename(memo)
+            if not stem:
+                self._log(f"[注意]「{s_str}-{e_str}」のメモはファイル名に"
+                          "使える文字が無いので、名前を変えませんでした", "warn")
+                continue
+            s_tag = sec_to_tag(s_sec)
+            if e_sec is None:
+                # 終了が inf のときは動画の長さが入るので、こちらでは分からない
+                pat = re.compile(rf" \[{s_tag}-[\d\-]+\]$")
+            else:
+                pat = re.compile(rf" \[{s_tag}-{sec_to_tag(e_sec)}\]$")
+
+            hits = [n for n in names if pat.search(os.path.splitext(n)[0])]
+            if not hits:
+                self._log(f"[注意]「{s_str}-{e_str}」のファイルが見つからず、"
+                          f"「{stem}」に変えられませんでした", "warn")
+                continue
+
+            exts = [os.path.splitext(n)[1] for n in hits]
+            final = self._uniq_stem(stem, exts)
+            for name, ext in zip(hits, exts):
+                src = os.path.join(self.download_dir, name)
+                dst = os.path.join(self.download_dir, final + ext)
+                try:
+                    os.rename(src, dst)
+                except OSError as e:
+                    self._log(f"[注意]「{name}」の名前を変えられませんでした"
+                              f"({e.strerror or e})", "warn")
+                    continue
+                names.remove(name)
+                names.append(final + ext)
+                # あとの処理が古いパスを見ないように差し替えておく
+                self._out_files = [dst if p == src else p for p in self._out_files]
+                self._log(f"[名前] {final + ext}", "ok")
+
+    def _uniq_stem(self, stem, exts):
+        """同じ名前のファイルがあるときに「-2」「-3」を足して避ける。"""
+        cand, n = stem, 1
+        while any(os.path.exists(os.path.join(self.download_dir, cand + e))
+                  for e in exts):
+            n += 1
+            cand = f"{stem}-{n}"
+        return cand
+
     # ffmpeg の進捗行(frame= 123 fps= 45 ... time=00:01:23.45 ...)
     _FFMPEG_PROGRESS = re.compile(r'^(frame|size)=')
     _FFMPEG_TIME     = re.compile(r'time=(\d{2}:\d{2}:\d{2})')
@@ -1205,6 +1338,8 @@ class App(tk.Tk):
         """cmd を別スレッドで実行し、終了時に _on_done を呼ぶ。"""
         self._err_lines = []  # エラー診断用にERROR/WARNING行を収集
         self._out_files = []  # 保存されたファイルのパス(完了後の画質確認用)
+        if not hasattr(self, "_rename_plan"):
+            self._rename_plan = []
         def task():
             try:
                 env = os.environ.copy()
@@ -1312,6 +1447,7 @@ class App(tk.Tk):
             self._set_status("完了！", GREEN)
             self._log(f"[完了] 保存先: {self.download_dir}", "ok")
             self._verify_output()
+            self._rename_by_memo()
             return
 
         if self.cancelled:

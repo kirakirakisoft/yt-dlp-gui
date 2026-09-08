@@ -1,4 +1,4 @@
-# yt-dlp GUI v3.3.0
+# yt-dlp GUI v3.4.0
 
 **KiraKiraKi Soft**
 
@@ -15,6 +15,7 @@ Made for people who want to use yt-dlp but find typing commands every time tedio
 - Switch between **Video + Audio (mp4)**, **Audio only (mp3)** and **Chat only (`live_chat.json`)**
 - **Time-range download** (save only the section you need) — at the **same full quality** as a complete download
 - **Multiple ranges in one go** — write one range per line and every one of them is extracted in a single download (no more repeating the whole job clip by clip when pulling several highlights out of a long stream)
+- **Name each section** — add `# best play` at the end of a range line and the extracted file is named after it
 - **Choose your download folder** (your settings are remembered)
 - Video downloads prefer **H.264 (avc1)** — a format that imports cleanly
   into editors like DaVinci Resolve
@@ -142,6 +143,26 @@ Stream title [00-12-00-00-27-00].mp4
 Stream title [01-03-10-01-05-00].mp4
 ```
 
+### Naming each section yourself
+
+Add `# name` **at the end of a line** and that becomes the file name.
+
+```
+*00:12:00-00:27:00  # best play
+*01:03:10-01:05:00  # greeting
+```
+
+```
+best play.mp4
+greeting.mp4
+```
+
+- Everything after `#` is read as a **name**, not as a time (a `#` at the start of a line is still a comment)
+- Lines without a name keep the usual `[start-end]` file name
+- Characters that cannot be used in a file name (`/ : * ?` and so on) are replaced with their full-width forms
+- If the same name appears twice, `-2` / `-3` is appended to the later one
+- Names are not applied when downloading a playlist (every video would get the same name)
+
 
 When the download finishes, the log reports the actual resolution:
 
@@ -232,6 +253,7 @@ Please note:
 
 ## Changelog
 
+- **v3.4.0** — **Sections can now be named.** Write `# best play` at the end of a range line and the extracted file is named after it (`best play.mp4`). Duplicate names get `-2` / `-3`, and characters that cannot be used in a file name are replaced with their full-width forms. Lines without a name keep the usual `[start-end]` name. This release also **fixes identical sections written in different notations (`00:12:00-00:27:00` and `720-1620`) being treated as different ranges** — they produced the same file name, so the second one was silently lost
 - **v3.3.0** — **Multiple time ranges can now be given at once.** The time range input changed from separate start/end fields to a multi-line box, and `*00:12:00-00:27:00` can be pasted straight in (without the `*`, as mm:ss, as seconds, or with `inf` too). Every range written is extracted in a single download. Output file names now carry the section start/end, which also fixes multiple sections overwriting each other. This release also **fixes time-range downloads always dropping to 360p** (older versions only considered pre-muxed mp4, which on YouTube is fixed at 640x360), fixes the log appearing frozen during section extraction, and adds a post-download resolution/codec check. **Added a field to choose which ffmpeg folder to use** (**ffmpeg 8.1.x breaks time-range downloads**, so point it at a 7.1 build; a warning is now shown before starting if ffmpeg is 8.x). The startup log shows the ffmpeg path and version in use
 - **v3.2.1** — Added a chat-only mode (saves the stream chat as `live_chat.json`). Switched the UI fonts to Japanese-friendly ones (Yu Gothic UI / BIZ UDGothic)
 - **v3.2** — Added playlist batch download (ON/OFF), record-live-from-start, automatic yt-dlp update on failure (confirm dialog / auto modes), and hover tooltips on each toggle
