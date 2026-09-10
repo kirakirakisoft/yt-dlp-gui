@@ -52,7 +52,7 @@ import sys
 import time
 
 APP_NAME    = "yt-dlp GUI"
-APP_VERSION = "v3.4.1"
+APP_VERSION = "v3.4.2"
 BRAND       = "キラキラキソフト"
 
 # ── カラー定義 ──────────────────────────────
@@ -82,6 +82,17 @@ BROWSERS = ["firefox", "chrome", "edge", "brave"]
 #   True        : 指定秒ちょうどで切る。区間全体を再エンコードするため非常に遅い
 #                 (1080p60を15分切り出すと10〜30分かかることがある)。
 FORCE_KEYFRAMES_AT_CUTS = False
+
+# 断片をいくつ同時に取るか。
+#
+# YouTube は動画を細かい断片に分けて配っていて、既定では1つずつ順番に
+# 取る。1本の接続あたりの速度は向こうが絞っているので、順番に取ると
+# 回線が空いていても 1MB/秒 前後で頭打ちになる。同時に取れば、そのぶん速い。
+#
+# 4 にしてあるのは、相手に負担をかけずに効果が出るあたりだから。
+# 増やしすぎると弾かれることがある。8 くらいまでは試す価値がある。
+# 1 にすれば元の挙動（順番に1つずつ）に戻る。
+CONCURRENT_FRAGMENTS = 4
 
 
 # ── 時間範囲(区間)の入力 ─────────────────────
@@ -348,6 +359,11 @@ class App(tk.Tk):
         self.chat_on     = tk.BooleanVar(value=False)
         self.autoupd_on  = tk.BooleanVar(value=bool(cfg.get("auto_update", False)))
         self._retried    = False  # 自動更新後の再試行は1回だけ
+        # YouTube がアカウント単位で有効にする SABR 配信に当たったか。
+        # 当たるとログイン状態では高い画質が一覧から消え、360p の1本しか
+        # 残らない。落ちてきた画質が低かったときに理由を言うために持つ。
+        self._sabr_hit       = False
+        self._cookie_retried = False  # Cookie無しでの落とし直しも1回だけ
         self.running     = False
         self.proc        = None
         self.cancelled   = False
@@ -1169,6 +1185,11 @@ class App(tk.Tk):
                 if FORCE_KEYFRAMES_AT_CUTS:
                     cmd += ["--force-keyframes-at-cuts"]
 
+        # 断片を同時に取って速度を上げる。チャットのみのときは動画を
+        # 落とさないので付けない。
+        if mode != "chat" and CONCURRENT_FRAGMENTS > 1:
+            cmd += ["-N", str(CONCURRENT_FRAGMENTS)]
+
         # 進捗を改行区切りで出力させる(GUIのログを行単位で読むため)
         cmd += ["--newline"]
 
@@ -1291,13 +1312,83 @@ class App(tk.Tk):
         if not (w and h):
             return
         msg = f"[確認] 実際の解像度: {w}x{h} / コーデック: {codec}"
-        if h <= 480:
-            self._log(msg, "warn")
-            self._log("[注意] 想定より低い解像度で保存されています。"
-                      "元動画がこの画質しか無いか、ffmpeg が正しく"
-                      "動いていない可能性があります", "warn")
-        else:
+        if h > 480:
             self._log(msg, "ok")
+            return
+
+        self._log(msg, "warn")
+
+        # Cookie が原因のときは、そう言い切る。
+        #
+        # 以前はここで「元動画がこの画質しか無いか、ffmpeg が正しく
+        # 動いていない可能性があります」とだけ出していた。どちらも外れで、
+        # 実際は YouTube がアカウントを SABR 配信の対象にしたせいだった。
+        # 見当違いの候補を並べると、当たっている所を探しに行けない。
+        if self._sabr_hit and self.cookies_on.get():
+            self._log("[原因] YouTube がこのアカウントを SABR 配信の対象に"
+                      "しています。ログインした状態だと 360p しか渡して"
+                      "もらえません。yt-dlp や ffmpeg のせいではありません",
+                      "warn")
+            self._log("[対処] 「Cookieを使う」のチェックを外して落とし直して"
+                      "ください。会員限定・年齢制限の動画以外は、Cookie が"
+                      "無くても落とせます", "warn")
+            self._offer_cookieless_retry()
+            return
+
+        if self.cookies_on.get():
+            self._log("[注意] 想定より低い解像度で保存されています。"
+                      "まず「Cookieを使う」のチェックを外して試してください"
+                      "(ログイン状態だと低い画質しか渡されないことがあります)。"
+                      "それでも変わらなければ、元動画がこの画質しか"
+                      "持っていない可能性があります", "warn")
+            return
+
+        self._log("[注意] 想定より低い解像度で保存されています。"
+                  "元動画がこの画質しか無いか、ffmpeg が正しく"
+                  "動いていない可能性があります", "warn")
+
+    def _offer_cookieless_retry(self):
+        """Cookie を使わずに落とし直すかを聞き、はいなら即やり直す。
+
+        同じファイル名で落とし直すことになるので --force-overwrites を足す。
+        付けないと yt-dlp が「has already been downloaded」で何もせずに
+        終わり、360p のファイルが残ったままになる。"""
+        if self._cookie_retried or not self._last_cmd:
+            return
+        ans = messagebox.askyesno(
+            "低い画質で保存されました",
+            "YouTube がこのアカウントを SABR 配信の対象にしているため、\n"
+            "ログインした状態では 360p しか取得できません。\n\n"
+            "Cookie を使わずに、同じ動画を落とし直しますか?\n"
+            "(会員限定・年齢制限の動画では失敗します)",
+            icon="question")
+        if not ans:
+            self._log("[情報] そのままにしました。あとで直すときは"
+                      "「Cookieを使う」のチェックを外してください", "info")
+            return
+
+        self._cookie_retried = True
+
+        # --cookies-from-browser とその値を取り除く
+        cmd, skip = [], False
+        for a in self._last_cmd:
+            if skip:
+                skip = False
+                continue
+            if a == "--cookies-from-browser":
+                skip = True
+                continue
+            cmd.append(a)
+        if "--force-overwrites" not in cmd:
+            cmd.insert(1, "--force-overwrites")
+
+        self._log("[再試行] Cookie を使わずに落とし直します", "warn")
+        self.running = True
+        self.cancelled = False
+        self.dl_btn.config(state="disabled", bg="#555", text="■  中止する")
+        self._set_status("Cookie無しで再取得中...", PINK)
+        self._last_cmd = cmd
+        self._run_download(cmd)
 
     def _rename_by_memo(self):
         """メモ付きの区間で切り出したファイルを、そのメモの名前に変える。
@@ -1407,6 +1498,10 @@ class App(tk.Tk):
         elif "WARNING" in line or "ERROR" in line:
             tag = "warn"
             self._err_lines.append(line)
+            # 「SABR-only streaming experiment for your account」。
+            # これが出た回は、ログインしているせいで高い画質が消えている。
+            if "SABR" in line:
+                self._sabr_hit = True
         self._capture_out_path(line)
         self.after(0, self._log, line, tag)
 
@@ -1414,6 +1509,7 @@ class App(tk.Tk):
         """cmd を別スレッドで実行し、終了時に _on_done を呼ぶ。"""
         self._err_lines = []  # エラー診断用にERROR/WARNING行を収集
         self._out_files = []  # 保存されたファイルのパス(完了後の画質確認用)
+        self._sabr_hit = False
         # 進捗表示用。今どの区間を、どれだけの長さで処理しているか
         self._cur_sec = None
         self._cur_sec_dur = None
