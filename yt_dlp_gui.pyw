@@ -52,7 +52,7 @@ import sys
 import time
 
 APP_NAME    = "yt-dlp GUI"
-APP_VERSION = "v3.4.2"
+APP_VERSION = "v3.5.0"
 BRAND       = "キラキラキソフト"
 
 # ── カラー定義 ──────────────────────────────
@@ -342,8 +342,9 @@ class App(tk.Tk):
         super().__init__()
         self.title(f"{APP_NAME} {APP_VERSION}")
         self.configure(bg=BG)
-        self.resizable(False, True)
-        self.geometry("660x920")  # icon.png使用時は自動で+30
+        # 横も伸ばせるようにする。オプションを3列にしたぶん横幅が要る。
+        self.resizable(True, True)
+        self.geometry("920x900")  # 実サイズは _build 後に画面に合わせて決める
 
         cfg = load_config()
         self.download_dir = cfg.get("download_dir") or default_download_dir()
@@ -358,6 +359,7 @@ class App(tk.Tk):
         self.live_on     = tk.BooleanVar(value=False)
         self.chat_on     = tk.BooleanVar(value=False)
         self.autoupd_on  = tk.BooleanVar(value=bool(cfg.get("auto_update", False)))
+        self.maxq_on     = tk.BooleanVar(value=bool(cfg.get("max_quality", True)))
         self._retried    = False  # 自動更新後の再試行は1回だけ
         # YouTube がアカウント単位で有効にする SABR 配信に当たったか。
         # 当たるとログイン状態では高い画質が一覧から消え、360p の1本しか
@@ -383,9 +385,7 @@ class App(tk.Tk):
         self._resolve_ffmpeg()
 
         self._build()
-        if self.icon_img:
-            self.geometry("660x950")
-        self.minsize(660, 740)
+        self._fit_to_screen()
         self.browser_var.trace_add("write", lambda *a: self._save_cfg())
         self._startup_check()
 
@@ -410,26 +410,27 @@ class App(tk.Tk):
                 self.icon_img = None  # 読めない画像は無視して通常起動
 
         # ヘッダー(ピンク→紫グラデーション)
-        hdr_h = 100 if self.icon_img else 70
-        self.hdr = tk.Canvas(self, height=hdr_h, width=660,
+        self.hdr_h = 100 if self.icon_img else 70
+        self.hdr = tk.Canvas(self, height=self.hdr_h, width=920,
                              highlightthickness=0, bd=0, bg=BG)
         self.hdr.pack(fill="x")
-        self._draw_gradient(self.hdr, 660, hdr_h, PINK, PURPLE)
-        cy = hdr_h // 2
-        self.hdr.create_text(20, cy - 12, anchor="w", text=APP_NAME,
-                             fill="white", font=("Yu Gothic UI", 18, "bold"))
-        self.hdr.create_text(22, cy + 14, anchor="w",
-                             text=f"{BRAND}  ·  Simple front-end for yt-dlp",
-                             fill="#ffd6ec", font=("Yu Gothic UI", 9))
-        if self.icon_img:
-            self.hdr.create_image(600, cy, image=self.icon_img)
-            self.hdr.create_text(540, hdr_h - 14, anchor="e", text=APP_VERSION,
-                                 fill="#ffd6ec", font=("Yu Gothic UI", 9, "bold"))
-        else:
-            self.hdr.create_text(640, cy + 14, anchor="e", text=APP_VERSION,
-                                 fill="#ffd6ec", font=("Yu Gothic UI", 9, "bold"))
+        # 横リサイズを許したので、幅が変わるたびに描き直す。
+        # (以前は幅660決め打ちで、窓を広げると右側が黒く残っていた)
+        self._hdr_w = None
+        self.hdr.bind("<Configure>", lambda e: self._draw_header(e.width))
 
         tk.Frame(self, bg=BORDER, height=1).pack(fill="x")
+
+        # フッターを先に下端へ確保する。pack は side よりも呼び出し順が
+        # 優先されるため、body(expand=True)を先に pack すると領域を
+        # すべて取られてフッターが描画されない。
+        ftr = tk.Frame(self, bg=BG, padx=20, pady=6)
+        ftr.pack(fill="x", side="bottom")
+        tk.Frame(self, bg=BORDER, height=1).pack(fill="x", side="bottom")
+        tk.Label(ftr, text=f"{APP_NAME} {APP_VERSION}  ·  {BRAND}",
+                 bg=BG, fg=FG3, font=("Yu Gothic UI", 8)).pack(side="left")
+        tk.Label(ftr, text="利用規約と著作権の範囲でご利用ください",
+                 bg=BG, fg=FG3, font=("Yu Gothic UI", 8)).pack(side="right")
 
         body = tk.Frame(self, bg=BG, padx=20, pady=12)
         body.pack(fill="both", expand=True)
@@ -449,11 +450,22 @@ class App(tk.Tk):
         url_entry.bind("<Return>",   lambda e: self._start())
         self._add_context_menu(url_entry, with_clear=True)
 
-        # 保存先
-        self._label(body, "保存先")
-        sf = tk.Frame(body, bg=BG3, highlightbackground="#1e1e1e",
+        # 保存先 と ffmpeg は横に並べる。縦に積むとログが画面外に
+        # 押し出されるため、広げた横幅をここで使う。
+        paths = tk.Frame(body, bg=BG)
+        paths.pack(fill="x", pady=(0, 12))
+        paths.columnconfigure(0, weight=3, uniform="pa")
+        paths.columnconfigure(1, weight=2, uniform="pa")
+        pcol_l = tk.Frame(paths, bg=BG)
+        pcol_l.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        pcol_r = tk.Frame(paths, bg=BG)
+        pcol_r.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+
+        # 保存先(左)
+        self._label(pcol_l, "保存先")
+        sf = tk.Frame(pcol_l, bg=BG3, highlightbackground="#1e1e1e",
                       highlightthickness=1)
-        sf.pack(fill="x", pady=(4, 12))
+        sf.pack(fill="x", pady=(4, 0))
         sf_in = tk.Frame(sf, bg=BG3)
         sf_in.pack(fill="x")
         self.dir_lbl = tk.Label(sf_in, text="", bg=BG3, fg=GREEN_L,
@@ -478,10 +490,10 @@ class App(tk.Tk):
                   "空欄のままなら、これまでどおり PATH から自動で探します。\n"
                   "※ 指定すると、区間切り出しだけでなく映像+音声の結合にも"
                   "そのフォルダの ffmpeg を使います。")
-        self._label(body, "ffmpeg の場所 (空欄で自動検出)")
-        ff = tk.Frame(body, bg=BG3, highlightbackground="#1e1e1e",
+        self._label(pcol_r, "ffmpeg の場所 (空欄で自動検出)")
+        ff = tk.Frame(pcol_r, bg=BG3, highlightbackground="#1e1e1e",
                       highlightthickness=1)
-        ff.pack(fill="x", pady=(4, 12))
+        ff.pack(fill="x", pady=(4, 0))
         ff_in = tk.Frame(ff, bg=BG3)
         ff_in.pack(fill="x")
         self.ffmpeg_var = tk.StringVar(value=self.ffmpeg_dir_cfg)
@@ -537,8 +549,9 @@ class App(tk.Tk):
         self._label(body, "オプション")
         grid = tk.Frame(body, bg=BG)
         grid.pack(fill="x", pady=(4, 12))
-        grid.columnconfigure(0, weight=1, uniform="opt")
-        grid.columnconfigure(1, weight=1, uniform="opt")
+        # 3列。2列だと縦に3段積み上がってログが画面外に押し出されていた。
+        for _c in (0, 1, 2):
+            grid.columnconfigure(_c, weight=1, uniform="opt")
 
         live_tip = ("配信中のライブを、今の時点からではなく配信開始まで遡って"
                     "ダウンロードします。\n"
@@ -562,16 +575,25 @@ class App(tk.Tk):
                     "  メンバー限定チャットや、チャットが無効/削除された配信では"
                     "取得できません。")
 
+        mq_tip = ("その動画で手に入る一番きれいな画質を取ります。\n"
+                  "解像度を最優先し、同じ解像度の中では編集ソフト互換の\n"
+                  "H.264 を選びます。\n"
+                  "※ 4K/1440p は YouTube 側に H.264 が無いため、その解像度を\n"
+                  "  取ると VP9/AV1 になります。編集ソフトによっては読めない\n"
+                  "  ことがあり、その場合は OFF にすると 1080p の H.264 に\n"
+                  "  固定されます。\n"
+                  "※ 元が 1080p までの動画では ON/OFF で結果は変わりません。")
+
         # ライブ配信(左上)
         live_cell = self._option_cell(grid, "ライブ最初から",
                                       self._toggle_live, live_tip)
-        live_cell.grid(row=0, column=0, sticky="nsew", padx=(0, 5), pady=(0, 8))
+        live_cell.grid(row=0, column=0, sticky="nsew", padx=(0, 4), pady=(0, 8))
         self.live_btn = live_cell._toggle
 
         # プレイリスト(右上)
         pl_cell = self._option_cell(grid, "プレイリスト",
                                     self._toggle_playlist, pl_tip)
-        pl_cell.grid(row=0, column=1, sticky="nsew", padx=(5, 0), pady=(0, 8))
+        pl_cell.grid(row=0, column=1, sticky="nsew", padx=(4, 4), pady=(0, 8))
         self.playlist_btn = pl_cell._toggle
 
         # Cookie(左下・ブラウザ選択つき)
@@ -594,22 +616,29 @@ class App(tk.Tk):
         ck_cell = self._option_cell(grid, "Cookieを使う",
                                     self._toggle_cookies, ck_tip,
                                     extra=cookie_extra)
-        ck_cell.grid(row=1, column=0, sticky="nsew", padx=(0, 5), pady=(0, 0))
+        ck_cell.grid(row=1, column=0, sticky="nsew", padx=(0, 4), pady=(0, 0))
         self.cookie_btn = ck_cell._toggle
         self._refresh_cookie_state()
 
         # 自動更新(右下)
         au_cell = self._option_cell(grid, "失敗時に自動更新",
                                     self._toggle_autoupd, au_tip)
-        au_cell.grid(row=1, column=1, sticky="nsew", padx=(5, 0), pady=(0, 0))
+        au_cell.grid(row=1, column=1, sticky="nsew", padx=(4, 4), pady=(0, 0))
         self.autoupd_btn = au_cell._toggle
         self._paint_toggle(self.autoupd_btn, self.autoupd_on.get())
 
         # チャットも保存(3段目・左)
         chat_cell = self._option_cell(grid, "チャットも保存",
                                       self._toggle_chat, chat_tip)
-        chat_cell.grid(row=2, column=0, sticky="nsew", padx=(0, 5), pady=(8, 0))
+        chat_cell.grid(row=1, column=2, sticky="nsew", padx=(4, 0), pady=(0, 0))
         self.chat_btn = chat_cell._toggle
+
+        # 最高画質優先(3段目・右)
+        mq_cell = self._option_cell(grid, "最高画質優先",
+                                    self._toggle_maxq, mq_tip)
+        mq_cell.grid(row=0, column=2, sticky="nsew", padx=(4, 0), pady=(0, 8))
+        self.maxq_btn = mq_cell._toggle
+        self._paint_toggle(self.maxq_btn, self.maxq_on.get())
 
         # DLボタン
         self.dl_btn = tk.Button(body, text="▼  ダウンロード開始",
@@ -642,7 +671,7 @@ class App(tk.Tk):
         log_frame.pack(fill="both", expand=True, pady=(4, 0))
         self.log = tk.Text(log_frame, bg=LOG_BG, fg=LOG_FG,
                            font=("BIZ UDGothic", 9), relief="flat", bd=8,
-                           wrap="word", state="disabled", height=6)
+                           wrap="word", state="disabled", height=8)
         self.log.pack(side="left", fill="both", expand=True)
         self.log.tag_config("ok",   foreground=LOG_OK)
         self.log.tag_config("warn", foreground=LOG_WARN)
@@ -652,14 +681,6 @@ class App(tk.Tk):
         sb.pack(side="right", fill="y")
         self.log["yscrollcommand"] = sb.set
 
-        # フッター
-        tk.Frame(self, bg=BORDER, height=1).pack(fill="x")
-        ftr = tk.Frame(self, bg=BG, padx=20, pady=6)
-        ftr.pack(fill="x")
-        tk.Label(ftr, text=f"{APP_NAME} {APP_VERSION}  ·  {BRAND}",
-                 bg=BG, fg=FG3, font=("Yu Gothic UI", 8)).pack(side="left")
-        tk.Label(ftr, text="利用規約と著作権の範囲でご利用ください",
-                 bg=BG, fg=FG3, font=("Yu Gothic UI", 8)).pack(side="right")
 
     # ── 起動時チェック ────────────────────────
     def _startup_check(self):
@@ -717,6 +738,44 @@ class App(tk.Tk):
 
         widget.bind("<Enter>", show)
         widget.bind("<Leave>", hide)
+
+    def _fit_to_screen(self):
+        """ウィンドウを画面の作業領域に収める。
+
+        高さを決め打ちにしていたため、タスクバーのぶんだけ下端が隠れて
+        ログやフッターが見えなくなっていた。画面サイズから毎回計算する。
+        """
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        want_h = 930 if self.icon_img else 900
+        w = min(920, max(860, sw - 120))
+        h = min(want_h, sh - 150)      # タスクバー+タイトルバーぶんを残す
+        x = max(0, (sw - w) // 2)
+        y = max(0, (sh - h) // 4)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.minsize(860, 620)
+
+    def _draw_header(self, w):
+        """ヘッダーを現在の幅で描き直す。横リサイズに追従させるため。"""
+        if w <= 1 or self._hdr_w == w:
+            return          # 同じ幅での無駄な再描画を防ぐ(線をw本引くため)
+        self._hdr_w = w
+        h = self.hdr_h
+        self.hdr.delete("all")
+        self._draw_gradient(self.hdr, w, h, PINK, PURPLE)
+        cy = h // 2
+        self.hdr.create_text(20, cy - 12, anchor="w", text=APP_NAME,
+                             fill="white", font=("Yu Gothic UI", 18, "bold"))
+        self.hdr.create_text(22, cy + 14, anchor="w",
+                             text=f"{BRAND}  ·  Simple front-end for yt-dlp",
+                             fill="#ffd6ec", font=("Yu Gothic UI", 9))
+        if self.icon_img:
+            self.hdr.create_image(w - 60, cy, image=self.icon_img)
+            self.hdr.create_text(w - 120, h - 14, anchor="e", text=APP_VERSION,
+                                 fill="#ffd6ec", font=("Yu Gothic UI", 9, "bold"))
+        else:
+            self.hdr.create_text(w - 20, cy + 14, anchor="e", text=APP_VERSION,
+                                 fill="#ffd6ec", font=("Yu Gothic UI", 9, "bold"))
 
     @staticmethod
     def _draw_gradient(canvas, w, h, c1, c2):
@@ -973,6 +1032,19 @@ class App(tk.Tk):
         else:
             self._log("自動更新: OFF · 失敗時に更新するか毎回確認します", "info")
 
+    def _toggle_maxq(self):
+        self.maxq_on.set(not self.maxq_on.get())
+        self._paint_toggle(self.maxq_btn, self.maxq_on.get())
+        self._save_cfg()
+        if self.maxq_on.get():
+            self._log("最高画質優先: ON · 解像度を最優先します。4K/1440p がある"
+                      "動画はその解像度で取得します(その場合 VP9/AV1 になり、"
+                      "編集ソフトによっては読めないことがあります)", "info")
+        else:
+            self._log("最高画質優先: OFF · H.264(avc1)限定で取得します。"
+                      "編集ソフト互換は確実ですが、YouTube の avc1 は 1080p "
+                      "までのため 4K/1440p の動画でも 1080p になります", "info")
+
     def _toggle_cookies(self):
         self.cookies_on.set(not self.cookies_on.get())
         self._paint_toggle(self.cookie_btn, self.cookies_on.get())
@@ -981,6 +1053,15 @@ class App(tk.Tk):
         if self.cookies_on.get():
             self._log(f"Cookie使用: ON ({self.browser_var.get()}) · "
                       "対象ブラウザでログイン済みである必要があります", "info")
+            if self.browser_var.get() in ("chrome", "brave"):
+                self._log("[注意] Chrome/Brave は起動中だと Cookie DB が"
+                          "ロックされて読み出しに失敗します。ブラウザを完全に"
+                          "終了してから実行してください(yt-dlp Issue #7271)。"
+                          "うまくいかない場合は Firefox を使ってください", "warn")
+            elif self.browser_var.get() == "edge":
+                self._log("[注意] Edge は環境により DPAPI の復号に失敗します"
+                          "(yt-dlp Issue #10927)。失敗する場合は Firefox を"
+                          "使ってください", "warn")
 
     @staticmethod
     def _paint_toggle(lbl, on):
@@ -1032,6 +1113,7 @@ class App(tk.Tk):
             "mode":         self.mode.get(),
             "auto_update":  bool(self.autoupd_on.get()),
             "ffmpeg_path":  self.ffmpeg_dir_cfg,
+            "max_quality":  bool(self.maxq_on.get()),
         })
 
     # ── ダウンロード処理 ─────────────────────
@@ -1161,13 +1243,29 @@ class App(tk.Tk):
             #   差し替えていたが、YouTube で映像+音声が1本になっている
             #   mp4 は itag18 (640x360) しか無いため、時間指定するだけで
             #   強制的に360pになっていた。この差し替えは撤去済み。
-            vid_format = (
-                "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/"
-                "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
-                "bestvideo+bestaudio/"
-                "best"
-            )
-            cmd += ["-f", vid_format, "--merge-output-format", "mp4"]
+            if self.maxq_on.get():
+                # 解像度を最優先し、同じ解像度の中でだけ H.264 を選ぶ。
+                # 4K/1440p がある動画はその解像度を取り、無ければ従来どおり
+                # H.264 の 1080p になる。動画ごとに利用者が判断しなくてよい。
+                #
+                # ※ proto を br より前に置くこと。YouTube の m3u8 形式は
+                #   DASH と同じ実体を配信しているのに公称ビットレートだけ
+                #   2〜4倍に見えるため、br だけで並べると実益の無い m3u8 が
+                #   選ばれてしまう(実測で差は0.1%だった)。
+                cmd += ["-f", "bv*+ba/b",
+                        "-S", "res,fps,vcodec:h264,proto,br",
+                        "--merge-output-format", "mp4"]
+            else:
+                # 編集ソフト互換を最優先: H.264(avc1) に限定する。
+                # ただし YouTube の avc1 は 1080p までしか無いので、
+                # 4K/1440p の動画では 1080p に落ちる。
+                vid_format = (
+                    "bestvideo[vcodec^=avc1]+bestaudio[ext=m4a]/"
+                    "bestvideo[ext=mp4]+bestaudio[ext=m4a]/"
+                    "bestvideo+bestaudio/"
+                    "best"
+                )
+                cmd += ["-f", vid_format, "--merge-output-format", "mp4"]
 
         if mode != "chat":
             if self.live_on.get():
